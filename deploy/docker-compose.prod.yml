@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: payments
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: always
+
+  rabbitmq:
+    image: rabbitmq:3.9-management
+    environment:
+      RABBITMQ_DEFAULT_USER: payments
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    restart: always
+
+  api:
+    build:
+      context: ..
+      dockerfile: services/api/Dockerfile
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      PROVIDER_API_KEY: ${PROVIDER_API_KEY}
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - rabbitmq
+    restart: always
+
+volumes:
+  pgdata:

@@ -1,0 +1,4 @@
+psycopg
+pika
+requests
+prometheus-client

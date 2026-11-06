@@ -1,0 +1,8 @@
+services:
+  reporting-ui:
+    image: nginx:latest
+    labels:
+      com.northwind.owner: analytics
+    ports:
+      - "8090:80"
+    restart: unless-stopped
