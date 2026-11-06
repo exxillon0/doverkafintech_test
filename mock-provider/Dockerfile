@@ -26,4 +26,6 @@ RUN chmod +x entrypoint.sh && chown -R appuser:appuser /app
 
 USER appuser
 EXPOSE 9443
+HEALTHCHECK --interval=3s --timeout=3s --start-period=10s --retries=5 \
+    CMD curl -fsSk https://localhost:9443/health || exit 1
 ENTRYPOINT ["./entrypoint.sh"]

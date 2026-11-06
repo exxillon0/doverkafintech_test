@@ -28,4 +28,6 @@ RUN chmod +x entrypoint.sh && chown -R appuser:appuser /app
 
 USER appuser
 EXPOSE 8000
+HEALTHCHECK --interval=5s --timeout=3s --start-period=15s --retries=5 \
+    CMD curl -fsS http://localhost:8000/health || exit 1
 ENTRYPOINT ["./entrypoint.sh"]

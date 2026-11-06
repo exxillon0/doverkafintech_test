@@ -1,6 +1,6 @@
 services:
   reporting-ui:
-    image: nginx:latest
+    image: nginx:1.27-alpine
     labels:
       com.northwind.owner: analytics
     ports:
