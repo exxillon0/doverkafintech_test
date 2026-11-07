@@ -1,7 +1,7 @@
 ENV ?=
 APP_VERSION ?=
 ALLOW_DEV_VAULT ?= 0
-
+IMAGE_REGISTRY ?=
 .PHONY: help deploy rollback smoke migrate test lint ci check-env check-version
 
 help:
@@ -25,8 +25,11 @@ check-version:
 	@test -n "$(APP_VERSION)" || (echo "ERROR: APP_VERSION is required" >&2; exit 1)
 
 deploy: check-env check-version
-	cd deploy && APP_VERSION=$(APP_VERSION) ALLOW_DEV_VAULT=$(ALLOW_DEV_VAULT) ./deploy.sh $(ENV)
-
+	cd deploy && \
+	  APP_VERSION=$(APP_VERSION) \
+	  ALLOW_DEV_VAULT=$(ALLOW_DEV_VAULT) \
+	  IMAGE_REGISTRY=$(IMAGE_REGISTRY) \
+	  ./deploy.sh $(ENV)
 rollback: check-env
 	cd deploy && ./rollback.sh $(ENV)
 

@@ -99,11 +99,14 @@ jobs:
               --severity HIGH "$IMG"
           done
 
-  cd:
+    cd:
     needs: ci
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
     env:
       APP_VERSION: ${{ needs.ci.outputs.sha }}
     steps:
@@ -115,6 +118,16 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Restore deploy state (previous/current APP_VERSION) from previous runs,
+      # so auto-rollback has a target even on ephemeral runners.
+      - name: Restore deploy state
+        uses: actions/cache/restore@v4
+        with:
+          path: deploy/.state
+          key: deploy-state-prod-${{ github.run_id }}
+          restore-keys: |
+            deploy-state-prod-
 
       - name: Write prod env from secrets
         env:
@@ -135,6 +148,8 @@ jobs:
           echo "Wrote deploy/env/prod.env (token length: ${#VAULT_TOKEN})"
 
       - name: Deploy (make deploy ENV=prod)
+        env:
+          IMAGE_REGISTRY: ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}
         run: make deploy ENV=prod APP_VERSION="${APP_VERSION}"
 
       - name: Smoke test
@@ -145,13 +160,29 @@ jobs:
       - name: Auto-rollback on failed smoke
         if: steps.smoke.outcome == 'failure'
         run: |
-          echo "::error::Smoke failed — rolling back"
-          make rollback ENV=prod || true
-          echo "::error::Rolled back. Fix the issue and redeploy."
+          set -euo pipefail
+          if [ -f deploy/.state/prod.previous_version ]; then
+            PREV="$(cat deploy/.state/prod.previous_version)"
+            echo "::error::Smoke failed — rolling back to ${PREV}"
+            make rollback ENV=prod
+            echo "::warning::Rolled back to ${PREV}. Fix the issue and redeploy."
+          else
+            echo "::error::Smoke failed, but no previous version recorded (first deploy?) — cannot rollback."
+            echo "::error::Manual recovery: make deploy ENV=prod APP_VERSION=<known-good-sha>"
+          fi
 
       - name: Fail the job if smoke failed
         if: steps.smoke.outcome == 'failure'
         run: exit 1
+
+      # Persist state only on success — so a failed run doesn't poison the cache.
+      # Unique key per run (run_id) because cache entries are immutable.
+      - name: Save deploy state
+        if: steps.smoke.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: deploy/.state
+          key: deploy-state-prod-${{ github.run_id }}
 
       - name: Record deployment
         if: steps.smoke.outcome == 'success'
