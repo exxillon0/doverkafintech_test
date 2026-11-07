@@ -161,7 +161,9 @@ services:
     image: prom/prometheus:v2.50.1
     volumes:
       - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/rules.yml:/etc/prometheus/rules.yml:ro 
       - promdata:/prometheus
+      
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=15d

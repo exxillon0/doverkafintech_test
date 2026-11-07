@@ -1,0 +1,39 @@
+groups:
+  - name: payment-stack
+    interval: 30s
+    rules:
+      - alert: WorkerDLQGrowing
+        expr: rate(worker_poison_messages_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Сообщения уходят в DLQ"
+          description: "worker_poison_messages_total растёт — ядовитые сообщения требуют ручного разбора. См. RUNBOOK.md § Ядовитые сообщения и DLQ."
+
+      - alert: WorkerDLQNotEmpty
+        expr: worker_dlq_size > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "В DLQ есть сообщения (>10 мин)"
+          description: "В transfers.dlq {{ $value }} сообщений. Кто-то должен разобрать."
+
+      - alert: ApiDependencyDown
+        expr: api_dependency_up < 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API потерял зависимость {{ $labels.dependency }}"
+          description: "api_dependency_up{dependency=\"{{ $labels.dependency }}\"} = 0 дольше 2 минут."
+
+      - alert: WorkerSilent
+        expr: up{job="worker"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker не отдаёт метрики 5 минут"
+          description: "Prometheus не может скрейпить worker:8001. Процесс жив? См. RUNBOOK.md § Мета-мониторинг."

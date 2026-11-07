@@ -3,7 +3,7 @@ import logging
 
 import pika
 import psycopg
-from prometheus_client import Counter, start_http_server
+from prometheus_client import Counter, Gauge, start_http_server
 
 from .config import load_settings
 from .logging_setup import request_id_var, setup_logging
@@ -11,16 +11,54 @@ from .messages import PoisonMessage, parse_message
 from .provider import send_payout
 
 log = logging.getLogger("worker")
+
 QUEUE = "transfers"
+DLX = "transfers.dlx"
+DLQ = "transfers.dlq"
+RETRY_QUEUE = "transfers.retry"
+MAX_RETRIES = 3
+RETRY_TTL_MS = 5000
+
 MESSAGES = Counter("worker_messages_total", "Processed messages", ["result"])
+POISON = Counter("worker_poison_messages_total", "Messages sent to DLQ")
+RETRIES = Counter("worker_retries_total", "Messages requeued for retry")
+DLQ_SIZE = Gauge("worker_dlq_size", "Approximate DLQ size")
 
 
 def _extract_request_id(body: bytes) -> str:
-    """request_id кладётся в payload api; если нет — '-'. Не падаем на битом JSON."""
     try:
         return json.loads(body).get("request_id", "-")
     except Exception:
         return "-"
+
+
+def _get_retry_count(properties: pika.BasicProperties) -> int:
+    if not properties.headers:
+        return 0
+    try:
+        return int(properties.headers.get("x-retry-count", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _publish_with_retry_count(channel, routing_key, body, retry_count):
+    channel.basic_publish(
+        exchange="",
+        routing_key=routing_key,
+        body=body,
+        properties=pika.BasicProperties(
+            delivery_mode=2,
+            headers={"x-retry-count": retry_count},
+        ),
+    )
+
+
+def _update_dlq_size(channel):
+    try:
+        result = channel.queue_declare(queue=DLQ, durable=True, passive=True)
+        DLQ_SIZE.set(result.method.message_count)
+    except Exception:
+        pass
 
 
 def process(settings, body):
@@ -35,15 +73,9 @@ def process(settings, body):
             raise LookupError(f"transfer {transfer_id} does not exist")
         amount_minor, currency, recipient, status = row
         if status != "PENDING":
-            log.info(
-                "skipping, status=%s",
-                status,
-                extra={"transfer_id": str(transfer_id)},
-            )
+            log.info("skipping, status=%s", status, extra={"transfer_id": str(transfer_id)})
             return
-        payout = send_payout(
-            settings, transfer_id, f"{amount_minor / 100:.2f}", currency, recipient
-        )
+        payout = send_payout(settings, transfer_id, f"{amount_minor / 100:.2f}", currency, recipient)
         conn.execute(
             "UPDATE transfers SET status = %s, provider_reference = %s, "
             "updated_at = now() WHERE id = %s",
@@ -59,42 +91,66 @@ def process(settings, body):
     )
 
 
+def _declare_topology(channel):
+    channel.exchange_declare(exchange=DLX, exchange_type="fanout", durable=True)
+    channel.queue_declare(queue=DLQ, durable=True)
+    channel.queue_bind(queue=DLQ, exchange=DLX)
+    channel.queue_declare(
+        queue=RETRY_QUEUE,
+        durable=True,
+        arguments={
+            "x-message-ttl": RETRY_TTL_MS,
+            "x-dead-letter-exchange": "",
+            "x-dead-letter-routing-key": QUEUE,
+        },
+    )
+    channel.queue_declare(
+        queue=QUEUE,
+        durable=True,
+        arguments={"x-dead-letter-exchange": DLX},
+    )
+
+
 def main():
     settings = load_settings()
     setup_logging(settings.log_level)
     start_http_server(8001)
 
-    credentials = pika.PlainCredentials(
-        settings.rabbitmq_user, settings.rabbitmq_password
-    )
+    credentials = pika.PlainCredentials(settings.rabbitmq_user, settings.rabbitmq_password)
     connection = pika.BlockingConnection(
-        pika.ConnectionParameters(
-            host=settings.rabbitmq_host, credentials=credentials
-        )
+        pika.ConnectionParameters(host=settings.rabbitmq_host, credentials=credentials)
     )
     channel = connection.channel()
-    channel.queue_declare(queue=QUEUE, durable=True)
+    _declare_topology(channel)
     channel.basic_qos(prefetch_count=1)
 
     def on_message(ch, method, properties, body):
         token = request_id_var.set(_extract_request_id(body))
+        retry_count = _get_retry_count(properties)
         try:
             process(settings, body)
         except PoisonMessage as exc:
-            # битый payload / невалидный JSON — НЕ повторяем, иначе вечный цикл
-            log.exception("poison message dropped", extra={"error": str(exc)})
-            MESSAGES.labels("poison").inc()
-            ch.basic_nack(method.delivery_tag, requeue=False)
+            log.exception("poison message -> DLQ", extra={"error": str(exc)})
+            POISON.inc()
+            _publish_with_retry_count(ch, DLQ, body, retry_count)
+            ch.basic_ack(method.delivery_tag)
         except Exception:
-            # TODO(Level 3 step 3): DLX + retry counter + max_retries
-            log.exception("failed to process message")
-            MESSAGES.labels("failed").inc()
-            ch.basic_nack(method.delivery_tag, requeue=True)
+            if retry_count < MAX_RETRIES:
+                log.warning("processing failed, retry %d/%d", retry_count + 1, MAX_RETRIES)
+                RETRIES.inc()
+                _publish_with_retry_count(ch, RETRY_QUEUE, body, retry_count + 1)
+                ch.basic_ack(method.delivery_tag)
+            else:
+                log.exception("max retries reached (%d) -> DLQ", MAX_RETRIES)
+                POISON.inc()
+                _publish_with_retry_count(ch, DLQ, body, retry_count)
+                ch.basic_ack(method.delivery_tag)
         else:
             MESSAGES.labels("processed").inc()
             ch.basic_ack(method.delivery_tag)
         finally:
             request_id_var.reset(token)
+            _update_dlq_size(ch)
 
     channel.basic_consume(queue=QUEUE, on_message_callback=on_message)
     log.info("consuming", extra={"queue": QUEUE})

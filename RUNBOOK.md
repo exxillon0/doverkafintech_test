@@ -62,3 +62,71 @@ API экспортирует четыре эндпоинта:
 
 `api_dependency_up{dependency="db|rabbit"}` — gauge 1/0. Если 0 дольше
 N минут → алерт (Level 4, пока не настроено, см. LIMITS.md § 4.2).
+
+
+## Ядовитые сообщения и DLQ
+
+Сообщение, которое не удалось обработать `MAX_RETRIES` раз (3) или
+которое не парсится (`PoisonMessage`), уходит в очередь `transfers.dlq`.
+
+### Посмотреть DLQ
+
+    docker compose exec rabbitmq rabbitmqadmin list queues name messages
+    # или
+    docker compose exec rabbitmq rabbitmqctl list_queues name messages
+
+### Достать сообщение из DLQ для разбора
+
+    docker compose exec rabbitmq rabbitmqadmin get queue=transfers.dlq count=1
+
+### Отправить сообщение обратно в основную очередь (replay)
+
+    # после ручного исправления payload
+    docker compose exec rabbitmq rabbitmqadmin publish \
+      exchange=amq.default routing_key=transfers payload='{"transfer_id":"..."}'
+
+### Почистить DLQ (осторожно!)
+
+    docker compose exec rabbitmq rabbitmqadmin purge queue=transfers.dlq
+
+### Метрики
+
+- `worker_poison_messages_total` — счётчик сообщений, отправленных в DLQ.
+- `worker_retries_total` — счётчик повторных попыток.
+- Алерт: если `rate(worker_poison_messages_total[5m]) > 0` — сообщения
+  уходят в DLQ, требуется ручной разбор (см. `monitoring/rules.yml`).
+
+
+## Ядовитые сообщения и DLQ
+
+Сообщение уходит в `transfers.dlq` в двух случаях:
+
+1. **PoisonMessage** — битый JSON / нет `transfer_id` / невалидный UUID → сразу в DLQ.
+2. **MAX_RETRIES исчерпан** — 3 неудачные попытки с интервалом 5 сек (retry-очередь с TTL).
+
+Метрики: `worker_poison_messages_total` (счётчик), `worker_retries_total`, `worker_dlq_size` (gauge).
+
+### Посмотреть DLQ
+
+    cd deploy
+    docker compose exec rabbitmq rabbitmqctl list_queues name messages | grep transfers
+
+### Достать сообщение для разбора
+
+    docker compose exec rabbitmq rabbitmqadmin get queue=transfers.dlq count=1
+
+### Replay (после ручного исправления)
+
+    docker compose exec rabbitmq rabbitmqadmin publish \
+      exchange=amq.default routing_key=transfers \
+      payload='{"transfer_id":"<uuid>","request_id":"replay-1"}'
+
+### Почистить DLQ (осторожно — сообщения пропадут)
+
+    docker compose exec rabbitmq rabbitmqadmin purge queue=transfers.dlq
+
+### Алерты
+
+- `WorkerDLQGrowing` — сообщения уходят в DLQ прямо сейчас.
+- `WorkerDLQNotEmpty` — в DLQ висит что-то дольше 10 минут.
+Оба требуют ручного разбора. См. `monitoring/rules.yml`.

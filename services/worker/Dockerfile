@@ -26,6 +26,6 @@ RUN chown -R appuser:appuser /app
 
 USER appuser
 EXPOSE 8001
-HEALTHCHECK --interval=5s --timeout=3s --start-period=15s --retries=5 \
-    CMD curl -fsS http://localhost:8001/health || exit 1
+HEALTHCHECK --interval=10s --timeout=3s --retries=5 --start-period=20s \
+  CMD python -c "import sys,urllib.request; urllib.request.urlopen('http://localhost:8001/metrics', timeout=2); sys.exit(0)"
 CMD ["python", "-m", "worker.consumer"]

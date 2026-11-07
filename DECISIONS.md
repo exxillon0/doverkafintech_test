@@ -38,3 +38,23 @@ Sync-проверки (psycopg, pika) унесены в `asyncio.to_thread`, ч�
 блокировать event loop Starlette. Timeout'ы ограничены 3с через
 `connect_timeout` в dsn и `socket_timeout` в pika — иначе `/health/ready`
 мог бы висеть.
+
+
+## DLQ через republish, а не nack(requeue=False)
+
+При ошибке сообщение **перепубликуется** в retry-очередь с `x-retry-count+1`,
+а оригинал подтверждается (`basic_ack`). Причины:
+
+- `basic_nack(requeue=False)` не даёт изменить заголовки — счётчик попыток
+  некуда положить.
+- Retry-очередь с `x-message-ttl=5000` даёт паузу между попытками (не
+  грузит CPU мгновенным retry) и возвращает сообщение в основную через
+  `x-dead-letter-exchange`.
+- После `MAX_RETRIES=3` — в DLQ через `transfers.dlx` (fanout).
+
+`PoisonMessage` (битый payload) — сразу в DLQ, без retry: повторять
+бессмысленно, только задержит очередь.
+
+Метрики `worker_poison_messages_total` + `worker_dlq_size` дают алерт
+`WorkerDLQGrowing` — самое важное для финтеха: одно «ядовитое» сообщение
+без DLQ останавливает все переводы.

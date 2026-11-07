@@ -39,7 +39,9 @@ def setup_logging(level: str = "INFO") -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level.upper())
-
+    # pika/prometheus_client слишком шумные на DEBUG — принудительно INFO
+    for noisy in ("pika", "urllib3", "prometheus_client"):
+        logging.getLogger(noisy).setLevel(logging.INFO)
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):

@@ -113,10 +113,14 @@ for svc in api worker mock-provider; do
   docker compose build "$svc"
 done
 
-# 5. Rollout — idempotent, no destructive 'down'
 echo "[5/6] Rolling out"
-docker compose up -d --remove-orphans
-
+# --build: пересобрать образы, если Dockerfile/код изменились.
+# Для prod (IMAGE_REGISTRY задан) — образы пуллятся, --build не нужен.
+if [ -n "${IMAGE_REGISTRY:-}" ]; then
+  docker compose up -d --remove-orphans
+else
+  docker compose up -d --remove-orphans --build
+fi
 # 6. Record success
 echo "[6/6] Recording version"
 echo "$APP_VERSION" > "$CURRENT_FILE"
