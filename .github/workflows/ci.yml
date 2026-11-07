@@ -6,10 +6,20 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BASE: ${{ github.repository }}
+
 jobs:
   ci:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -19,11 +29,18 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('services/**/requirements.txt') }}
+
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r services/api/requirements.txt
           pip install -r services/worker/requirements.txt
-          pip install pytest
+          pip install pytest ruff
 
       - name: Run tests
         run: |
@@ -31,68 +48,129 @@ jobs:
           pytest services/worker/tests -v
 
       - name: Lint
-        run: |
-          pip install ruff
-          ruff check services/api/ services/worker/
-
-      - name: Build images
-        run: |
-          cd deploy
-          docker compose build api worker mock-provider
-
-      - name: Scan images for vulnerabilities
-        run: |
-          docker scan api:latest || true
-          docker scan worker:latest || true
-          docker scan mock-provider:latest || true
+        run: ruff check services/api/ services/worker/
 
       - name: Record SHA
-        run: echo "SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
+        id: meta
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push images
+        if: github.event_name == 'push'
+        env:
+          SHA: ${{ steps.meta.outputs.sha }}
+        run: |
+          set -euo pipefail
+          cd deploy
+          docker compose build api worker mock-provider
+          for svc in api worker mock-provider; do
+            SRC="$(docker compose images -q "$svc" | head -n1)"
+            if [ -z "$SRC" ]; then
+              echo "Image for service '$svc' not found"
+              exit 1
+            fi
+            docker tag "$SRC" "${REGISTRY}/${IMAGE_BASE}/${svc}:${SHA}"
+            docker push "${REGISTRY}/${IMAGE_BASE}/${svc}:${SHA}"
+          done
+
+      - name: Install Trivy
+        if: github.event_name == 'push'
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin
+
+      - name: Scan images (Trivy)
+        if: github.event_name == 'push'
+        env:
+          SHA: ${{ steps.meta.outputs.sha }}
+        run: |
+          # exit-code 0 — не валим сборку, как в исходнике (|| true).
+          # Если нужно блокировать — поменяй на --exit-code 1 и --ignore-unfixed.
+          for svc in api worker mock-provider; do
+            echo "== Scanning ${svc} =="
+            trivy image --no-progress --exit-code 0 --severity HIGH,CRITICAL \
+              "${REGISTRY}/${IMAGE_BASE}/${svc}:${SHA}"
+          done
 
   cd:
     needs: ci
     if: github.ref == 'refs/heads/release-prod'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      SHA: ${{ needs.ci.outputs.sha }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Log in to registry
+        uses: docker/login-action@v3
         with:
-          python-version: "3.12"
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Deploy to stage
+        env:
+          IMAGE_TAG: ${{ needs.ci.outputs.sha }}
+          IMAGE_REGISTRY: ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}
         run: |
           cd deploy
+          # deploy.sh должен использовать ${IMAGE_TAG} / ${IMAGE_REGISTRY}
+          # для `docker compose pull` и запуска нужной версии.
           ./deploy.sh stage
-          # Run smoke test
-          curl -fsS http://localhost:8000/health || exit 1
-          echo "Stage deployment successful"
 
-      - name: Run migration (separate step)
+      - name: Wait for API health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health; then
+              echo "API healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API did not become healthy in time"
+          exit 1
+
+      - name: Apply migrations
         run: |
           cd deploy
-          # Apply migrations manually via psql
-          docker exec deploy-db-1 psql -U payments -d payments -f migrations/001_create_transfers.sql
-          echo "Migrations applied"
+          if [ -f migrations/001_create_transfers.sql ]; then
+            docker compose exec -T db \
+              psql -U payments -d payments \
+              < migrations/001_create_transfers.sql
+            echo "Migrations applied"
+          else
+            echo "No migrations found, skipping"
+          fi
 
-      - name: Smoke test after deploy
+      - name: Post-deploy smoke test
         run: |
-          # Verify all services are healthy
+          set -euo pipefail
           curl -fsS http://localhost:8000/health
-          curl -fsS http://localhost:5432/pg_isready -U payments -d payments
+          cd deploy
+          docker compose exec -T db pg_isready -U payments -d payments
           echo "All health checks passed"
 
       - name: Record deployment
         run: |
-          echo "Deployment SHA: $SHA" >> deployment.txt
-          echo "Stage deployed successfully" >> deployment.txt
+          mkdir -p artifacts
+          {
+            echo "Deployment SHA: ${SHA}"
+            echo "Stage deployed successfully"
+            echo "Timestamp (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > artifacts/deployment.txt
+          cat artifacts/deployment.txt
 
-workflow:
-  rules:
-    - if: github.event_name == 'push'
-      when: always
-    - if: github.event_name == 'pull_request'
-      when: always
+      - name: Upload deployment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-info
+          path: artifacts/deployment.txt
