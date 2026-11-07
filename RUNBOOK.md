@@ -130,3 +130,60 @@ N минут → алерт (Level 4, пока не настроено, см. LI
 - `WorkerDLQGrowing` — сообщения уходят в DLQ прямо сейчас.
 - `WorkerDLQNotEmpty` — в DLQ висит что-то дольше 10 минут.
 Оба требуют ручного разбора. См. `monitoring/rules.yml`.
+
+## Бэкап и восстановление БД
+
+### Ручной бэкап
+
+    make backup ENV=prod
+    # → backups/payments-prod-20261108T120000Z.sql.gz
+
+Проверяется на:
+- файл непустой
+- валидный gzip (`gzip -t`)
+- retention: старые (>7 дней, настраивается `RETENTION_DAYS`) удаляются
+
+### Автоматический (cron на хосте)
+
+    # crontab -e
+    0 3 * * * cd /path/to/repo && make backup ENV=prod >> /var/log/payments-backup.log 2>&1
+
+Или через `scripts/backup-loop.sh prod` под systemd. Для тестового задания
+cron на хосте достаточен — см. LIMITS § 3.4 (S3 не подключён).
+
+### Проверенное восстановление (restore drill)
+
+**Обязательно после каждого изменения схемы или инфраструктуры БД.**
+
+    make restore-drill ENV=prod
+
+Что делает:
+1. Останавливает `worker` (freeze state — новые transfers не появляются).
+2. Берёт последний бэкап (или `FILE=...`).
+3. Создаёт temp БД `payments_restore_verify_<ts>`.
+4. Восстанавливает бэкап в temp БД.
+5. Сравнивает `count(*) FROM transfers` source vs restored.
+6. Проверяет наличие `schema_migrations`.
+7. Дропает temp БД (`WITH (FORCE)`).
+8. Возобновляет worker.
+
+Если drill упал — бэкап **невалиден**, restore в проде провалится.
+Разбирать до того, как случится инцидент.
+
+### Восстановление на месте (destructive!)
+
+    make restore ENV=prod FILE=backups/payments-prod-20261108T120000Z.sql.gz
+
+- Требует ввода `yes` (защита от опечатки).
+- Восстанавливает **поверх** БД `payments`.
+- Worker должен быть остановлен: `docker compose -p payment-prod stop worker`.
+- **Код не откатывается.** После restore нужен `make deploy ENV=prod APP_VERSION=<sha-из-дампа>`, иначе новый код может быть несовместим со старой схемой.
+
+### Что происходит со схемой
+
+Дамп включает `schema_migrations`. После restore таблица вернётся к прежнему состоянию.
+При следующем `make deploy` шаг `[3/6] Applying migrations` применит недостающие миграции.
+
+**Осторожно**: если между дампом и restore были применены ломающие миграции
+(`DROP`/`RENAME`), restore + повторная миграция могут конфликтовать.
+См. `DECISIONS.md` § expand→contract и `RUNBOOK.md` § Откат релиза.

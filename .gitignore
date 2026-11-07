@@ -23,3 +23,6 @@ artifacts/
 
 # Docker
 *.tar
+
+# backups (не коммитим — данные)
+backups/

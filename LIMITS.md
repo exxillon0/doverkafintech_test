@@ -313,3 +313,15 @@
 3. DLQ для worker.
 4. Stage-джоба в CI + GitHub Environment для prod.
 5. `request_id` + structured logging.
+
+
+### 3.4. Бэкап БД: локально на хосте, без offsite
+
+- **Что**: `scripts/backup.sh` делает `pg_dump` → gzip → `backups/` на том же хосте.
+  Retention 7 дней (настраивается). Restore drill есть (`make restore-drill`).
+- **Почему**: S3/MinIO требует кредов, бакета, IAM. Для тестового задания —
+  over-engineering; локальный диск показывает, что механика работает.
+- **Влияние**: при потере хоста бэкапы тоже теряются. Для прод-финтеха
+  недопустимо.
+- **Что нужно**: `aws s3 cp` в `backup.sh`, отдельный bucket с версионированием,
+  lifecycle policy, шифрование (SSE-KMS). Restore drill — из S3, не с локали.
