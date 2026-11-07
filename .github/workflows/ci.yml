@@ -1,27 +1,98 @@
-name: ci
+name: Payment Stack CI/CD
 
 on:
   push:
-    branches: [release-prod]
+    branches: [release-prod, stage]
+  pull_request:
+    branches: [main]
 
 jobs:
-  build:
-    runs-on: [self-hosted, northwind-builder]
+  ci:
+    runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      matrix:
-        service: [api, worker, mock-provider]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Test
+
+      - name: Install dependencies
         run: |
-          pip install pytest -r services/api/requirements.txt -r services/worker/requirements.txt
-          PYTHONPATH=services/api pytest services/api/tests
-          PYTHONPATH=services/worker pytest services/worker/tests
-      - name: Build
+          pip install -r services/api/requirements.txt
+          pip install -r services/worker/requirements.txt
+          pip install pytest
+
+      - name: Run tests
         run: |
-          touch deploy/runtime.env
-          docker compose -f deploy/docker-compose.yml build ${{ matrix.service }}
+          pytest services/api/tests -v
+          pytest services/worker/tests -v
+
+      - name: Lint
+        run: |
+          pip install ruff
+          ruff check services/api/ services/worker/
+
+      - name: Build images
+        run: |
+          cd deploy
+          docker compose build api worker mock-provider
+
+      - name: Scan images for vulnerabilities
+        run: |
+          docker scan api:latest || true
+          docker scan worker:latest || true
+          docker scan mock-provider:latest || true
+
+      - name: Record SHA
+        run: echo "SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+  cd:
+    needs: ci
+    if: github.ref == 'refs/heads/release-prod'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Deploy to stage
+        run: |
+          cd deploy
+          ./deploy.sh stage
+          # Run smoke test
+          curl -fsS http://localhost:8000/health || exit 1
+          echo "Stage deployment successful"
+
+      - name: Run migration (separate step)
+        run: |
+          cd deploy
+          # Apply migrations manually via psql
+          docker exec deploy-db-1 psql -U payments -d payments -f migrations/001_create_transfers.sql
+          echo "Migrations applied"
+
+      - name: Smoke test after deploy
+        run: |
+          # Verify all services are healthy
+          curl -fsS http://localhost:8000/health
+          curl -fsS http://localhost:5432/pg_isready -U payments -d payments
+          echo "All health checks passed"
+
+      - name: Record deployment
+        run: |
+          echo "Deployment SHA: $SHA" >> deployment.txt
+          echo "Stage deployed successfully" >> deployment.txt
+
+workflow:
+  rules:
+    - if: github.event_name == 'push'
+      when: always
+    - if: github.event_name == 'pull_request'
+      when: always

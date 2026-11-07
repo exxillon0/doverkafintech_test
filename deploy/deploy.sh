@@ -10,7 +10,7 @@ set -a
 . "env/$ENV.env"
 set +a
 
-docker compose down -v
+docker compose down
 docker compose up -d --wait vault
 ./vault/seed.sh "$ENV"
 ./vault/render-env.sh "$ENV"
