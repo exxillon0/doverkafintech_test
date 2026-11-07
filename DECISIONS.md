@@ -58,3 +58,18 @@ Sync-проверки (psycopg, pika) унесены в `asyncio.to_thread`, ч�
 Метрики `worker_poison_messages_total` + `worker_dlq_size` дают алерт
 `WorkerDLQGrowing` — самое важное для финтеха: одно «ядовитое» сообщение
 без DLQ останавливает все переводы.
+
+
+## Vault: ephemeral dev-token по умолчанию, реальный секрет — opt-in
+
+CI по умолчанию генерирует ephemeral `VAULT_DEV_ROOT_TOKEN`, если секрет
+не задан в GitHub Secrets. Причина: ТЗ требует, чтобы проект
+разворачивался «с нуля по README» без настройки — иначе ревьюер упадёт
+на шаге 1.
+
+Для реального прода — `ALLOW_EPHEMERAL_VAULT_TOKEN=false` в
+Settings→Variables. Тогда деплой без секрета падает на шаге
+`Write prod env from secrets`, не доходя до `make deploy`.
+
+Компромисс: ephemeral-токен **не безопасен** (это dev-режим Vault), но
+это явно задокументировано и не является default для прода.

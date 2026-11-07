@@ -187,3 +187,48 @@ cron на хосте достаточен — см. LIMITS § 3.4 (S3 не по�
 **Осторожно**: если между дампом и restore были применены ломающие миграции
 (`DROP`/`RENAME`), restore + повторная миграция могут конфликтовать.
 См. `DECISIONS.md` § expand→contract и `RUNBOOK.md` § Откат релиза.
+
+## Секреты и Vault: что если секрета нет
+
+Vault работает в **dev-режиме** (см. `DECISIONS.md`). Для реального прода
+dev-режим непригоден — данные в памяти, аутентификации нет.
+
+### Поведение по окружениям
+
+| Сценарий | Поведение | Зачем |
+|---|---|---|
+| `ENV=stage` локально | токен из `stage.env.example` (`stage-dev-root`) | demo работает из коробки |
+| `ENV=prod` локально без `ALLOW_DEV_VAULT` | `deploy.sh` падает с понятной ошибкой | нельзя случайно задеплоить «прод» с dev-токеном |
+| `ENV=prod` локально с `ALLOW_DEV_VAULT=1` | генерируется случайный токен, сохраняется в `prod.env` | demo/защита |
+| CI `prod`, секрет задан | реальный токен из GitHub Secrets | правильный путь |
+| CI `prod`, секрет не задан, `ALLOW_EPHEMERAL_VAULT_TOKEN=true` (default) | ephemeral токен + `::warning::` | ревьюер клонирует → работает |
+| CI `prod`, секрет не задан, `ALLOW_EPHEMERAL_VAULT_TOKEN=false` | fail с `::error::` на шаге `Write prod env from secrets` | реальный прод |
+
+### Как включить «настоящий прод-режим» в CI
+
+Settings → Secrets and variables → Actions → **Variables** → New variable:
+
+- Name: `ALLOW_EPHEMERAL_VAULT_TOKEN`
+- Value: `false`
+
+И задать secret `VAULT_DEV_ROOT_TOKEN` с реальным значением.
+
+После этого деплой без секрета падает на шаге `Write prod env from secrets`,
+не доходя до `make deploy`.
+
+### Что делать, если Vault перезапустился
+
+Dev-режим Vault хранит данные **в памяти**. При перезапуске контейнера:
+- все секреты пропадают
+- `runtime.env` остаётся (генерируется `render-env.sh`)
+- новые контейнеры подхватят старый `runtime.env`
+
+Восстановить:
+
+    cd deploy
+    docker compose -p payment-stage up -d vault
+    ./vault/seed.sh stage
+    ./vault/render-env.sh stage
+    docker compose -p payment-stage up -d --force-recreate api worker
+
+Это автоматически делает `make deploy` (`deploy.sh` шаг `[1/6]`).

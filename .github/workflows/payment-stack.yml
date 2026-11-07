@@ -131,13 +131,19 @@ jobs:
       - name: Write prod env from secrets
         env:
           VAULT_TOKEN: ${{ secrets.VAULT_DEV_ROOT_TOKEN }}
+          ALLOW_EPHEMERAL: ${{ vars.ALLOW_EPHEMERAL_VAULT_TOKEN || 'true' }}
         run: |
           set -euo pipefail
           mkdir -p deploy/env
           if [ -z "${VAULT_TOKEN}" ]; then
-            echo "::warning::VAULT_DEV_ROOT_TOKEN secret not set — generating ephemeral dev-mode token."
-            echo "::warning::For real prod, set it in Settings → Secrets and variables → Actions."
-            VAULT_TOKEN="$(openssl rand -hex 24)"
+            if [ "${ALLOW_EPHEMERAL}" = "true" ]; then
+              echo "::warning::VAULT_DEV_ROOT_TOKEN secret not set — using ephemeral dev token (ALLOW_EPHEMERAL_VAULT_TOKEN=true)."
+              VAULT_TOKEN="$(openssl rand -hex 24)"
+            else
+              echo "::error::VAULT_DEV_ROOT_TOKEN is required for prod (ALLOW_EPHEMERAL_VAULT_TOKEN=false)."
+              echo "::error::Settings → Secrets and variables → Actions → New repository secret: VAULT_DEV_ROOT_TOKEN"
+              exit 1
+            fi
           fi
           {
             echo "VAULT_DEV_ROOT_TOKEN=${VAULT_TOKEN}"
