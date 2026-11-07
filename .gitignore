@@ -26,3 +26,6 @@ artifacts/
 
 # backups (не коммитим — данные)
 backups/
+
+deploy/env/*.env
+!deploy/env/*.env.example
