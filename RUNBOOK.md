@@ -1,49 +1,64 @@
 ## Откат релиза
 
-### Быстрый откат кода (одна команда)
+### Быстрый откат кода
 
     make rollback ENV=prod
 
-Скрипт `deploy/rollback.sh` читает `deploy/.state/prod.previous_version`,
-подтягивает образы этой версии из GHCR (`docker compose pull`) и поднимает
-их (`docker compose up -d --remove-orphans`). Идемпотентно, без `down`.
+Читает `deploy/.state/prod.previous_version`, пуллит образы этой версии,
+поднимает через `docker compose up -d --remove-orphans`. Не делает `down`.
 
-Автооткат в CI: если `make smoke ENV=prod` падает после деплоя, workflow
-автоматически вызывает `make rollback ENV=prod` и помечает job как failed.
+Автооткат в CI: если `make smoke ENV=prod` падает — workflow вызывает
+`make rollback` автоматически.
 
-### Откат на произвольную версию
+### Что происходит со схемой БД
 
-    make deploy ENV=prod APP_VERSION=<sha-старой-версии>
+**Схема НЕ откатывается автоматически.** Правила:
 
-Это НЕ откат в обычном смысле — это новый «деплой» старого SHA. Работает
-только если схема БД совместима со старой версией (см. ниже).
+1. Миграции применяются ДО раскатки кода (`deploy.sh` шаг [3/6]).
+2. Политика expand → migrate → contract:
+   - релиз N: только ADD COLUMN / CREATE TABLE
+   - релиз N+1: код использует новые поля
+   - релиз N+2: DROP / RENAME, когда откат на N уже невозможен
+3. `migrate.sh` идемпотентен (таблица `schema_migrations`) + `pg_advisory_lock`.
+4. Если миграция была ломающей (RENAME/DROP) и нужен откат кода:
+   - `make rollback` сломает приложение — не делать
+   - восстановить БД из бэкапа, затем `make deploy ENV=prod APP_VERSION=<old-sha>`
 
-### Что происходит со схемой БД при откате
+### Запрещено
+- Править применённые миграции задним числом
+- RENAME/DROP в одном релизе с фичами
+- `docker compose down -v` в скриптах
 
-**Схема НЕ откатывается автоматически.** Это осознанное решение:
+## Здоровье сервисов (health/readiness)
 
-1. Миграции применяются ДО раскатки нового кода (см. `deploy.sh` шаг 3).
-2. Политика — **expand → migrate → contract**:
-   - релиз N: миграция только добавляет колонки/таблицы (`ADD COLUMN ... NULL`,
-     `CREATE TABLE IF NOT EXISTS`). Старый код при этом продолжает работать.
-   - релиз N+1: новый код использует новые поля.
-   - релиз N+2 (через несколько дней): только тогда — `DROP COLUMN` /
-     `RENAME`, когда убедились, что никто не откатится на N.
-3. `deploy/migrate.sh` идемпотентен: ведёт таблицу `schema_migrations`,
-   уже применённые версии пропускает. Откат кода (`make rollback`) с
-   миграциями ничего не делает — они уже применены и совместимы.
-4. Если миграция была ломающей (rename/drop), и нужно откатить код:
-   - откат кода `make rollback` **сломает приложение** (старый код не знает
-     о новой схеме) — не делать;
-   - восстановить из бэкапа БД (см. `§ Бэкап и восстановление`) на момент
-     до миграции, затем `make deploy ENV=prod APP_VERSION=<old-sha>`.
+API экспортирует четыре эндпоинта:
 
-### Правила, которые нельзя нарушать
+| Endpoint | Что проверяет | Коды |
+|---|---|---|
+| `/health` | только процесс (liveness) | 200 всегда |
+| `/health/ready` | БД + RabbitMQ | 200 / 503 |
+| `/health/db` | только БД (`SELECT 1`) | 200 / 503 |
+| `/health/rabbit` | только RabbitMQ (`queue_declare passive`) | 200 / 503 |
 
-- Миграции, применённые на stage, **никогда** не правятся задним числом.
-  Нужна правка — новая миграция `NNN__fix.sql`.
-- `RENAME` и `DROP` — отдельным релизом, не вместе с фичами.
-- Advisory lock (`pg_advisory_lock(728394)`) защищает от параллельного
-  запуска миграций. Если миграция висит — `SELECT * FROM pg_locks WHERE
-  locktype='advisory'` покажет держателя; `pg_terminate_backend(pid)` его
-  снимет (осторожно).
+**Docker healthcheck смотрит на `/health`** (liveness). При падении БД
+контейнер api остаётся `healthy` — рестарт api не починит БД, рестартить
+не нужно.
+
+**Smoke после деплоя смотрит на `/health/ready`.** Если api поднялся, но
+не видит БД/очередь, smoke упадёт → сработает автооткат.
+
+### Диагностика: «api живой, но 503»
+
+    # что именно сломано?
+    docker compose exec -T api python -c \
+      "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/db')"
+    docker compose exec -T api python -c \
+      "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/rabbit')"
+
+Если `/health/db` → 503: проверь `docker compose ps db`, `docker compose logs db`.
+Если `/health/rabbit` → 503: проверь `docker compose ps rabbitmq`, `rabbitmq-diagnostics ping`.
+
+### Метрики
+
+`api_dependency_up{dependency="db|rabbit"}` — gauge 1/0. Если 0 дольше
+N минут → алерт (Level 4, пока не настроено, см. LIMITS.md § 4.2).

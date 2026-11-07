@@ -19,3 +19,22 @@
 эксплуатируемых CRITICAL. `HIGH` — лог, не блокирует, чтобы не вставать
 из-за неисправимых уязвимостей в базовом образе Python/Postgres. Ревизия
 порогов — раз в месяц, либо при появлении патча.
+
+
+## Liveness vs Readiness: раздельные endpoint'ы
+
+`/health` = liveness (процесс жив). `/health/ready` = readiness (БД +
+RabbitMQ доступны). Причины:
+
+- Docker healthcheck смотрит на liveness. Падение БД не должно приводить
+  к рестарту api — рестарт не починит внешнюю зависимость, только
+  увеличит downtime.
+- Smoke после деплоя смотрит на readiness. Если api поднялся, но не видит
+  БД — деплой считается проваленным, срабатывает автооткат.
+- `api_dependency_up{dependency}` gauge позволяет алертить на «api видит
+  БД?» без парсинга логов (алерт — Level 4, TODO).
+
+Sync-проверки (psycopg, pika) унесены в `asyncio.to_thread`, чтобы не
+блокировать event loop Starlette. Timeout'ы ограничены 3с через
+`connect_timeout` в dsn и `socket_timeout` в pika — иначе `/health/ready`
+мог бы висеть.
