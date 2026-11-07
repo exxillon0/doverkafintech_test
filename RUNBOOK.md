@@ -198,7 +198,10 @@ worker пропускает повторную публикацию.
 
     docker compose -p payment-stage exec -T rabbitmq sh -c \
       'rabbitmqadmin -u "$RABBITMQ_DEFAULT_USER" -p "$RABBITMQ_DEFAULT_PASS" \
-       purge queue=transfers.dlq'
+       purge queue name=transfers.dlq'
+
+Синтаксис `rabbitmqadmin`: `<команда> <тип> name=<имя>`. `purge queue=transfers.dlq`
+даёт `ERROR: Type queue=transfers.dlq not recognised`.
 
 ### Алерты (Prometheus)
 

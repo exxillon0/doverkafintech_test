@@ -21,23 +21,23 @@ validate_ascii() {
         echo "ERROR: $name from Vault contains non-ASCII characters." >&2
         echo "       Value (hex): $(printf '%s' "$value" | xxd -p)" >&2
         echo "       This breaks RabbitMQ/Erlang (badarg in list_to_binary/1)." >&2
-        echo "       Fix: delete secret in Vault and re-seed with ASCII-only passwords:" >&2
-        echo "         docker compose exec -T vault vault kv delete secret/payment-stack/$ENV" >&2
-        echo "         ./vault/seed.sh $ENV" >&2
+        echo "       Fix: docker compose exec -T vault vault kv delete secret/payment-stack/$ENV" >&2
+        echo "            ./vault/seed.sh $ENV" >&2
         exit 1
     fi
 }
 
+# --- Fallback: Vault returned empty (Vault down or secret missing) ---
+# Deterministic ASCII defaults → repeated deploys don't invalidate existing volumes.
 if [[ -z "$DB_PASS" || -z "$RMQ_PASS" ]]; then
-    echo "⚠️  Vault not ready — writing dev defaults to runtime.env"
-    cat > runtime.env <<EOT
-POSTGRES_PASSWORD=devpostgres$(gen_ascii_fallback 2>/dev/null || echo -n "0123456789abcdef")
-RABBITMQ_DEFAULT_PASS=devrabbit$(gen_ascii_fallback 2>/dev/null || echo -n "0123456789abcdef")
-PROVIDER_API_KEY=devprovider$(gen_ascii_fallback 2>/dev/null || echo -n "0123456789abcdef")
-EOT
-    exit 0
+    echo "⚠️  Vault returned empty secrets for $ENV — using fixed dev defaults" >&2
+    echo "    (check deploy.sh [1.5/6]: seed.sh should run before render-env.sh)" >&2
+    DB_PASS="devpostgres0123456789abcdef"
+    RMQ_PASS="devrabbit0123456789abcdef"
+    PROVIDER_KEY="devprovider0123456789abcdef"
 fi
 
+# Validate BEFORE writing runtime.env — no exceptions, no fallback bypass
 validate_ascii "db_password" "$DB_PASS"
 validate_ascii "rabbitmq_password" "$RMQ_PASS"
 validate_ascii "provider_api_key" "$PROVIDER_KEY"
@@ -48,5 +48,5 @@ RABBITMQ_DEFAULT_PASS=$RMQ_PASS
 PROVIDER_API_KEY=$PROVIDER_KEY
 EOT
 
-echo "✅ runtime.env generated:"
+echo "✅ runtime.env generated ($(wc -c < runtime.env) bytes):"
 sed 's/=.*/=<redacted>/' runtime.env
