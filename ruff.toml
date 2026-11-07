@@ -1,8 +1,9 @@
 target-version = "py312"
-line-length = 100
+line-length = 130
 
 [lint]
 select = ["E", "F", "I"]
+ignore = ["E501"]
 
 [lint.isort]
 known-first-party = ["app", "worker"]
