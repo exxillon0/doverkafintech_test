@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import logging
 import uuid
 
@@ -14,19 +15,25 @@ from .config import load_settings
 from .logging_setup import RequestIDMiddleware, request_id_var, setup_logging
 from .validation import InvalidTransfer, parse_transfer, to_minor
 
-import functools
 
+@functools.lru_cache(maxsize=1)
 def _settings():
+    """Lazy: load_settings() вызовется при первом обращении, не на import.
+    Это позволяет тестам импортировать app.main без env-переменных."""
     return load_settings()
 
+
 class _LazySettings:
+    """Прокси: все обращения к `settings.X` резолвятся в _settings().X."""
+
     def __getattr__(self, name):
         return getattr(_settings(), name)
+
 
 settings = _LazySettings()
 setup_logging()
 log = logging.getLogger("api")
-log.info("starting", extra={"db_host": settings.db_host, "log_level": settings.log_level})
+log.info("api module imported")
 
 REQUESTS = Counter("api_requests_total", "HTTP requests", ["method", "path", "status"])
 DEP_UP = Gauge("api_dependency_up", "1=ok, 0=down", ["dependency"])
@@ -38,6 +45,7 @@ def count(request, response):
 
 
 # ---------- health ----------
+
 
 async def health(request):
     """Liveness. Процесс жив — 200, даже если зависимости лежат.
@@ -53,6 +61,7 @@ def _check_db_sync() -> None:
 
 def _check_rabbit_sync() -> None:
     import pika
+
     credentials = pika.PlainCredentials(settings.rabbitmq_user, settings.rabbitmq_password)
     params = pika.ConnectionParameters(
         host=settings.rabbitmq_host,
@@ -104,13 +113,17 @@ async def health_ready(request):
     return JSONResponse(
         {
             "status": "ok" if ready else "degraded",
-            "checks": {name: {"ok": ok, "detail": detail} for name, (ok, detail) in results.items()},
+            "checks": {
+                name: {"ok": ok, "detail": detail}
+                for name, (ok, detail) in results.items()
+            },
         },
         status_code=200 if ready else 503,
     )
 
 
 # ---------- transfers ----------
+
 
 def row_to_json(row):
     return {
@@ -140,11 +153,15 @@ async def create_transfer(request):
             (transfer_id, to_minor(amount), currency, recipient, "PENDING", client_ip),
         )
         row = conn.execute(SELECT, (transfer_id,)).fetchone()
+    # Прокидываем request_id в сообщение — worker будет логировать его же
     broker.publish(
         settings,
         {"transfer_id": str(transfer_id), "request_id": request_id_var.get()},
     )
-    log.info("transfer created", extra={"transfer_id": str(transfer_id), "client_ip": client_ip})
+    log.info(
+        "transfer created",
+        extra={"transfer_id": str(transfer_id), "client_ip": client_ip},
+    )
     return count(request, JSONResponse(row_to_json(row), status_code=202))
 
 
