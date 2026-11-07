@@ -2,7 +2,7 @@ name: Payment Stack CI/CD
 
 on:
   push:
-    branches: [release-prod, stage]
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -55,6 +55,7 @@ jobs:
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to registry
+        # Пушим образы только при push в main (не на PR из форков)
         if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
@@ -91,8 +92,8 @@ jobs:
         env:
           SHA: ${{ steps.meta.outputs.sha }}
         run: |
-          # exit-code 0 — не валим сборку, как в исходнике (|| true).
-          # Если нужно блокировать — поменяй на --exit-code 1 и --ignore-unfixed.
+          # exit-code 0 — не блокируем деплой, как в исходнике (|| true).
+          # Хочешь security gate — поменяй на --exit-code 1.
           for svc in api worker mock-provider; do
             echo "== Scanning ${svc} =="
             trivy image --no-progress --exit-code 0 --severity HIGH,CRITICAL \
@@ -101,7 +102,8 @@ jobs:
 
   cd:
     needs: ci
-    if: github.ref == 'refs/heads/release-prod'
+    # Деплой только при push в main, не на pull_request
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -117,7 +119,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Deploy to stage
+      - name: Deploy to production
         env:
           IMAGE_TAG: ${{ needs.ci.outputs.sha }}
           IMAGE_REGISTRY: ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}
@@ -125,7 +127,7 @@ jobs:
           cd deploy
           # deploy.sh должен использовать ${IMAGE_TAG} / ${IMAGE_REGISTRY}
           # для `docker compose pull` и запуска нужной версии.
-          ./deploy.sh stage
+          ./deploy.sh prod
 
       - name: Wait for API health
         run: |
@@ -164,7 +166,8 @@ jobs:
           mkdir -p artifacts
           {
             echo "Deployment SHA: ${SHA}"
-            echo "Stage deployed successfully"
+            echo "Branch: main"
+            echo "Deployed successfully"
             echo "Timestamp (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } > artifacts/deployment.txt
           cat artifacts/deployment.txt
