@@ -1,11 +1,10 @@
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
-from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from app.logging_setup import RequestIDMiddleware
 from app import main as app_main
+from app.logging_setup import RequestIDMiddleware
 
 
 def _client():
@@ -20,7 +19,7 @@ def _client():
     return TestClient(app)
 
 
-def test_health_liveness_always_ok(monkeypatch):
+def test_health_liveness_always_ok():
     client = _client()
     resp = client.get("/health")
     assert resp.status_code == 200

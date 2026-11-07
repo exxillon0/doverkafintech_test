@@ -1,8 +1,6 @@
 import json
 import logging
 
-import pytest
-
 from worker.consumer import _extract_request_id
 from worker.logging_setup import JsonFormatter, request_id_var
 
