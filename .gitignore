@@ -1,9 +1,25 @@
+# Python
 __pycache__/
-*.pyc
-deploy/runtime.env
-backups/
-# deploy runtime state (per-environment previous/current version)
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Deploy runtime state (per-machine, per-environment)
 deploy/.state/
 deploy/runtime.env
 deploy/env/*.env
 !deploy/env/*.env.example
+
+# Env / secrets
+.env
+*.env.bak
+
+# Artifacts
+artifacts/
+*.zip
+
+# Docker
+*.tar

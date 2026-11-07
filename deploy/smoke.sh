@@ -16,7 +16,7 @@ export COMPOSE_PROJECT_NAME="payment-${ENV}"
 
 echo "===== SMOKE ${ENV} ====="
 
-# 1. API /health (retry up to 60s)
+# 1. API /health — inside the container, since api doesn't publish 8000 to host
 for i in $(seq 1 30); do
   if docker compose exec -T api python -c \
      "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)" 2>/dev/null; then

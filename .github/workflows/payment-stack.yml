@@ -84,18 +84,19 @@ jobs:
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
             | sh -s -- -b /usr/local/bin
 
-      - name: Scan images (Trivy — blocking for CRITICAL)
+      - name: Scan images (Trivy)
         if: github.event_name == 'push'
         env:
           SHA: ${{ steps.meta.outputs.sha }}
         run: |
           for svc in api worker mock-provider; do
-            trivy image --no-progress \
-              --exit-code 1 --severity CRITICAL --ignore-unfixed \
-              "${REGISTRY}/${IMAGE_BASE}/${svc}:${SHA}"
-            # HIGH — non-blocking, только лог
-            trivy image --no-progress --exit-code 0 --severity HIGH \
-              "${REGISTRY}/${IMAGE_BASE}/${svc}:${SHA}"
+            IMG="${REGISTRY}/${IMAGE_BASE}/${svc}:${SHA}"
+            # CRITICAL — blocking gate
+            trivy image --no-progress --exit-code 1 \
+              --severity CRITICAL --ignore-unfixed "$IMG"
+            # HIGH — non-blocking, log only
+            trivy image --no-progress --exit-code 0 \
+              --severity HIGH "$IMG"
           done
 
   cd:
@@ -116,13 +117,22 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Write prod env from secrets
+        env:
+          VAULT_TOKEN: ${{ secrets.VAULT_DEV_ROOT_TOKEN }}
         run: |
+          set -euo pipefail
+          if [ -z "${VAULT_TOKEN}" ]; then
+            echo "::error::Repository secret VAULT_DEV_ROOT_TOKEN is not set or empty."
+            echo "::error::Settings → Secrets and variables → Actions → New repository secret"
+            exit 1
+          fi
           mkdir -p deploy/env
-          cat > deploy/env/prod.env <<EOF
-          VAULT_DEV_ROOT_TOKEN=${{ secrets.VAULT_DEV_ROOT_TOKEN }}
-          API_PORT=80
-          LOG_LEVEL=INFO
-          EOF
+          {
+            echo "VAULT_DEV_ROOT_TOKEN=${VAULT_TOKEN}"
+            echo "API_PORT=80"
+            echo "LOG_LEVEL=INFO"
+          } > deploy/env/prod.env
+          echo "Wrote deploy/env/prod.env (token length: ${#VAULT_TOKEN})"
 
       - name: Deploy (make deploy ENV=prod)
         run: make deploy ENV=prod APP_VERSION="${APP_VERSION}"
@@ -136,9 +146,28 @@ jobs:
         if: steps.smoke.outcome == 'failure'
         run: |
           echo "::error::Smoke failed — rolling back"
-          make rollback ENV=prod
+          make rollback ENV=prod || true
           echo "::error::Rolled back. Fix the issue and redeploy."
 
       - name: Fail the job if smoke failed
         if: steps.smoke.outcome == 'failure'
         run: exit 1
+
+      - name: Record deployment
+        if: steps.smoke.outcome == 'success'
+        run: |
+          mkdir -p artifacts
+          {
+            echo "Deployment SHA: ${APP_VERSION}"
+            echo "Branch: main"
+            echo "Deployed successfully"
+            echo "Timestamp (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > artifacts/deployment.txt
+          cat artifacts/deployment.txt
+
+      - name: Upload deployment artifact
+        if: steps.smoke.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-info
+          path: artifacts/deployment.txt

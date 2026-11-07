@@ -38,7 +38,7 @@ if [ ${#PENDING[@]} -eq 0 ]; then
   exit 0
 fi
 
-echo "Applying ${#PENDING[@]} migration(s) in a single transaction under advisory lock ${ADVISORY_LOCK_ID} ..."
+echo "Applying ${#PENDING[@]} migration(s) under advisory lock ${ADVISORY_LOCK_ID} ..."
 
 {
   echo "BEGIN;"
