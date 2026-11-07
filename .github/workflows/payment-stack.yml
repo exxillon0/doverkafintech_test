@@ -21,16 +21,13 @@ jobs:
     outputs:
       sha: ${{ steps.meta.outputs.sha }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Cache pip
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: pip-${{ hashFiles('services/**/requirements.txt') }}
@@ -42,15 +39,11 @@ jobs:
           pip install -r services/worker/requirements.txt
           pip install pytest ruff
 
-      # python -m pytest добавляет cwd в sys.path → `import app` работает
-      - name: Run tests
-        run: |
-          set -euo pipefail
-          (cd services/api && python -m pytest tests -v)
-          (cd services/worker && python -m pytest tests -v)
-
       - name: Lint
-        run: ruff check services/api/ services/worker/
+        run: make lint
+
+      - name: Test
+        run: make test
 
       - name: Record SHA
         id: meta
@@ -64,8 +57,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # APP_VERSION=SHA заставит compose протегировать образы
-      # как northwind/payment-api:<SHA> и т.д. через ${APP_VERSION:-...}
       - name: Build and push images
         if: github.event_name == 'push'
         env:
@@ -76,18 +67,13 @@ jobs:
           cd deploy
           touch runtime.env
           docker compose build api worker mock-provider
-
           for svc in api worker mock-provider; do
             case "$svc" in
               api)           SRC="northwind/payment-api:${APP_VERSION}" ;;
               worker)        SRC="northwind/payment-worker:${APP_VERSION}" ;;
               mock-provider) SRC="northwind/mock-provider:${APP_VERSION}" ;;
             esac
-            if ! docker image inspect "$SRC" >/dev/null 2>&1; then
-              echo "Image $SRC not found after build"
-              docker images | grep -E 'northwind|payment' || docker images
-              exit 1
-            fi
+            docker image inspect "$SRC" >/dev/null
             docker tag "$SRC" "${REGISTRY}/${IMAGE_BASE}/${svc}:${SHA}"
             docker push "${REGISTRY}/${IMAGE_BASE}/${svc}:${SHA}"
           done
@@ -98,14 +84,17 @@ jobs:
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
             | sh -s -- -b /usr/local/bin
 
-      - name: Scan images (Trivy)
+      - name: Scan images (Trivy — blocking for CRITICAL)
         if: github.event_name == 'push'
         env:
           SHA: ${{ steps.meta.outputs.sha }}
         run: |
           for svc in api worker mock-provider; do
-            echo "== Scanning ${svc} =="
-            trivy image --no-progress --exit-code 0 --severity HIGH,CRITICAL \
+            trivy image --no-progress \
+              --exit-code 1 --severity CRITICAL --ignore-unfixed \
+              "${REGISTRY}/${IMAGE_BASE}/${svc}:${SHA}"
+            # HIGH — non-blocking, только лог
+            trivy image --no-progress --exit-code 0 --severity HIGH \
               "${REGISTRY}/${IMAGE_BASE}/${svc}:${SHA}"
           done
 
@@ -115,10 +104,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      SHA: ${{ needs.ci.outputs.sha }}
+      APP_VERSION: ${{ needs.ci.outputs.sha }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Log in to registry
         uses: docker/login-action@v3
@@ -127,100 +115,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Deploy to production
-        env:
-          APP_VERSION: ${{ needs.ci.outputs.sha }}
+      - name: Write prod env from secrets
         run: |
-          set -euo pipefail
-          cd deploy
+          mkdir -p deploy/env
+          cat > deploy/env/prod.env <<EOF
+          VAULT_DEV_ROOT_TOKEN=${{ secrets.VAULT_DEV_ROOT_TOKEN }}
+          API_PORT=80
+          LOG_LEVEL=INFO
+          EOF
 
-          # Подтягиваем образы из GHCR и перетегируем под имена compose
-          for svc in api worker mock-provider; do
-            docker pull "${REGISTRY}/${IMAGE_BASE}/${svc}:${APP_VERSION}"
-            case "$svc" in
-              api)           TARGET="northwind/payment-api" ;;
-              worker)        TARGET="northwind/payment-worker" ;;
-              mock-provider) TARGET="northwind/mock-provider" ;;
-            esac
-            docker tag "${REGISTRY}/${IMAGE_BASE}/${svc}:${APP_VERSION}" "${TARGET}:${APP_VERSION}"
-          done
+      - name: Deploy (make deploy ENV=prod)
+        run: make deploy ENV=prod APP_VERSION="${APP_VERSION}"
 
-          # env + vault
-          touch runtime.env
-          set -a
-          . "env/prod.env"
-          set +a
+      - name: Smoke test
+        id: smoke
+        continue-on-error: true
+        run: make smoke ENV=prod
 
-          docker compose down
-          docker compose up -d --wait vault
-          ./vault/seed.sh prod
-          ./vault/render-env.sh prod
-
-          docker compose up -d --remove-orphans
-          for service in api worker mock-provider; do
-            docker compose ps "$service"
-          done
-
-      # api не публикует порт наружу — только reverse-proxy.
-      # Поэтому health-check выполняется ВНУТРИ контейнера api.
-      - name: Wait for API health
+      - name: Auto-rollback on failed smoke
+        if: steps.smoke.outcome == 'failure'
         run: |
-          cd deploy
-          for i in $(seq 1 30); do
-            if docker compose exec -T api python -c \
-              "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"; then
-              echo "API healthy"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "API did not become healthy in time"
-          docker compose logs --tail=100 api || true
-          exit 1
+          echo "::error::Smoke failed — rolling back"
+          make rollback ENV=prod
+          echo "::error::Rolled back. Fix the issue and redeploy."
 
-      - name: Apply migrations
-        run: |
-          set -euo pipefail
-          cd deploy
-          if [ -f migrations/001_create_transfers.sql ]; then
-            docker compose exec -T db \
-              psql -U payments -d payments \
-              < migrations/001_create_transfers.sql
-            echo "Migrations applied"
-          else
-            echo "No migrations found at migrations/001_create_transfers.sql"
-          fi
-
-      - name: Post-deploy smoke test
-        run: |
-          set -euo pipefail
-          cd deploy
-          # API
-          docker compose exec -T api python -c \
-            "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"
-          # DB
-          docker compose exec -T db pg_isready -U payments -d payments
-          # Reverse-proxy (снаружи, через опубликованный порт)
-          if curl -fsS "http://localhost:${API_PORT:-8080}/health" >/dev/null 2>&1; then
-            echo "Reverse-proxy /health OK"
-          else
-            echo "WARN: reverse-proxy /health not reachable at :${API_PORT:-8080} (check nginx.conf)"
-          fi
-          echo "All health checks passed"
-
-      - name: Record deployment
-        run: |
-          mkdir -p artifacts
-          {
-            echo "Deployment SHA: ${SHA}"
-            echo "Branch: main"
-            echo "Deployed successfully"
-            echo "Timestamp (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          } > artifacts/deployment.txt
-          cat artifacts/deployment.txt
-
-      - name: Upload deployment artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: deployment-info
-          path: artifacts/deployment.txt
+      - name: Fail the job if smoke failed
+        if: steps.smoke.outcome == 'failure'
+        run: exit 1

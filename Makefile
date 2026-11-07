@@ -1,38 +1,41 @@
-.PHONY: lint test build scan deploy deploy-stage deploy-prod clean
+ENV ?=
+APP_VERSION ?=
 
-IMAGE_API ?= northwind/payment-api
-IMAGE_WORKER ?= northwind/payment-worker
-IMAGE_MOCK ?= northwind/mock-provider:local
-VERSION ?= 1.0.0
+.PHONY: help deploy rollback smoke migrate test lint ci check-env check-version
 
-deploy-stage:
-	@echo ">>> Deploying to STAGE environment"
-	cd deploy && ./deploy.sh stage
+help:
+	@echo "Targets:"
+	@echo "  make deploy   ENV=stage|prod APP_VERSION=<sha>   # deploy"
+	@echo "  make rollback ENV=stage|prod                     # roll back to previous"
+	@echo "  make smoke    ENV=stage|prod                     # post-deploy smoke"
+	@echo "  make migrate                                     # apply SQL migrations"
+	@echo "  make test                                        # pytest"
+	@echo "  make lint                                        # ruff"
+	@echo "  make ci                                          # lint + test"
 
-deploy-prod:
-	@echo ">>> Deploying to PROD environment"
-	cd deploy && ./deploy.sh prod
+check-env:
+	@test -n "$(ENV)" || (echo "ERROR: ENV is required (stage|prod)" >&2; exit 1)
 
-ci: lint test build scan
+check-version:
+	@test -n "$(APP_VERSION)" || (echo "ERROR: APP_VERSION is required" >&2; exit 1)
 
-lint:
-	@echo ">>> Running Python lint"
-	python -m ruff check services/ || true
+deploy: check-env check-version
+	cd deploy && APP_VERSION=$(APP_VERSION) ./deploy.sh $(ENV)
+
+rollback: check-env
+	cd deploy && ./rollback.sh $(ENV)
+
+smoke: check-env
+	cd deploy && ./smoke.sh $(ENV)
+
+migrate:
+	cd deploy && ./migrate.sh
 
 test:
-	@echo ">>> Running tests"
-	pytest services/api/tests services/worker/tests -v
+	(cd services/api && python -m pytest tests -v)
+	(cd services/worker && python -m pytest tests -v)
 
-build:
-	@echo ">>> Building images"
-	docker compose -f deploy/docker-compose.yml build api worker mock-provider
+lint:
+	ruff check services/api/ services/worker/
 
-scan:
-	@echo ">>> Scanning images"
-	docker scan $(IMAGE_API):$(VERSION)
-	docker scan $(IMAGE_WORKER):$(VERSION)
-	docker scan $(IMAGE_MOCK):$(VERSION)
-
-clean:
-	@echo ">>> Cleaning"
-	docker compose down -v
+ci: lint test

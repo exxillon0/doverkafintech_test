@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 deploy/runtime.env
 backups/
+# deploy runtime state (per-environment previous/current version)
+deploy/.state/
+deploy/runtime.env
+deploy/env/*.env
+!deploy/env/*.env.example
