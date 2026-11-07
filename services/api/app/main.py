@@ -14,8 +14,17 @@ from .config import load_settings
 from .logging_setup import RequestIDMiddleware, request_id_var, setup_logging
 from .validation import InvalidTransfer, parse_transfer, to_minor
 
-settings = load_settings()
-setup_logging(settings.log_level)
+import functools
+
+def _settings():
+    return load_settings()
+
+class _LazySettings:
+    def __getattr__(self, name):
+        return getattr(_settings(), name)
+
+settings = _LazySettings()
+setup_logging()
 log = logging.getLogger("api")
 log.info("starting", extra={"db_host": settings.db_host, "log_level": settings.log_level})
 
