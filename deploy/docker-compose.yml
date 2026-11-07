@@ -12,11 +12,11 @@ services:
     ports:
       - "127.0.0.1:8200:8200"
     healthcheck:
-      test: ["CMD", "vault", "status"]
+      test: ["CMD-SHELL", "vault status -address=http://127.0.0.1:8200 || [ $? -eq 2 ]"]
       interval: 5s
       timeout: 3s
       retries: 12
-      start_period: 10s
+      start_period: 15s
     restart: unless-stopped
     logging: &logging
       driver: json-file
