@@ -90,12 +90,37 @@ while ! docker compose up -d --wait vault 2>&1 | tee /tmp/vault-up.log; do
   sleep 3
 done
 
+# --- Seed Vault + render runtime.env (db/rabbitmq need these values) ---
+echo "[1.5/6] Seeding Vault + rendering runtime.env"
+./vault/seed.sh "$ENV"
+./vault/render-env.sh "$ENV"
+
+if [ ! -s runtime.env ]; then
+  echo "ERROR: runtime.env is empty after render-env.sh — Vault seed/render failed" >&2
+  echo "--- runtime.env ---" >&2
+  ls -la runtime.env >&2 || true
+  echo "--- vault status ---" >&2
+  docker compose ps vault >&2 || true
+  echo "--- vault logs (last 100) ---" >&2
+  docker compose logs --tail=100 vault >&2 || true
+  exit 1
+fi
+echo "runtime.env OK ($(wc -c < runtime.env) bytes)"
+
+# 2. Data plane
 echo "[2/6] db + rabbitmq up"
 if ! docker compose up -d --wait db rabbitmq; then
   echo "" >&2
   echo "ERROR: db or rabbitmq failed to become healthy. Diagnostics:" >&2
   echo "--- compose ps ---" >&2
   docker compose ps >&2 || true
+  echo "--- db logs (last 200) ---" >&2
+  docker compose logs --tail=200 db >&2 || true
+  echo "--- db inspect ---" >&2
+  DB_ID=$(docker compose ps -q db 2>/dev/null)
+  if [ -n "$DB_ID" ]; then
+    docker inspect "$DB_ID" --format 'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} restarts={{.RestartCount}}' >&2 || true
+  fi
   echo "--- rabbitmq logs (last 200) ---" >&2
   docker compose logs --tail=200 rabbitmq >&2 || true
   echo "--- rabbitmq inspect ---" >&2
@@ -145,14 +170,14 @@ for svc in api worker mock-provider; do
   docker compose build "$svc"
 done
 
+# 5. Rollout — idempotent, no destructive 'down'
 echo "[5/6] Rolling out"
-# --build: пересобрать образы, если Dockerfile/код изменились.
-# Для prod (IMAGE_REGISTRY задан) — образы пуллятся, --build не нужен.
 if [ -n "${IMAGE_REGISTRY:-}" ]; then
   docker compose up -d --remove-orphans
 else
   docker compose up -d --remove-orphans --build
 fi
+
 # 6. Record success
 echo "[6/6] Recording version"
 echo "$APP_VERSION" > "$CURRENT_FILE"
