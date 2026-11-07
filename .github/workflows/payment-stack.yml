@@ -71,6 +71,7 @@ jobs:
         run: |
           set -euo pipefail
           cd deploy
+           touch runtime.env  
           docker compose build api worker mock-provider
           for svc in api worker mock-provider; do
             SRC="$(docker compose images -q "$svc" | head -n1)"
