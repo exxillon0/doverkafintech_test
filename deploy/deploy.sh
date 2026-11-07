@@ -70,13 +70,22 @@ echo "COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME}"
 
 # 1. Vault first — runtime.env must be rendered before db starts
 echo "[1/6] Vault up"
-if ! docker compose up -d --wait vault; then
-  echo "WARN: vault failed initial health check, retrying once..." >&2
+vault_attempt=1
+vault_max_attempts=3
+while ! docker compose up -d --wait vault; do
+  if [ "$vault_attempt" -ge "$vault_max_attempts" ]; then
+    echo "ERROR: vault failed health check after ${vault_max_attempts} attempts" >&2
+    docker compose ps vault || true
+    docker compose logs --no-color vault || true
+    exit 1
+  fi
+  echo "WARN: vault failed health check on attempt ${vault_attempt}/${vault_max_attempts}, retrying..." >&2
   docker compose ps vault || true
   docker compose logs --no-color vault || true
   docker compose rm -sf vault || true
-  docker compose up -d --wait vault
-fi
+  vault_attempt=$((vault_attempt + 1))
+  sleep 2
+done
 ./vault/seed.sh "$ENV"
 ./vault/render-env.sh "$ENV"
 
