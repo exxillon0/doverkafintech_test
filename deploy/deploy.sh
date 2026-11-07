@@ -82,9 +82,36 @@ docker compose up -d --wait db rabbitmq
 echo "[3/6] Applying migrations"
 ./migrate.sh
 
-# 4. Pull application images (idempotent)
-echo "[4/6] Pulling images"
-docker compose pull api worker mock-provider
+# 4. Resolve application images:
+#    a) IMAGE_REGISTRY set  → pull from registry, retag as northwind/*
+#    b) local image exists  → use it
+#    c) otherwise           → build from source
+echo "[4/6] Resolving application images"
+for svc in api worker mock-provider; do
+  case "$svc" in
+    api)           LOCAL="northwind/payment-api:${APP_VERSION}" ;;
+    worker)        LOCAL="northwind/payment-worker:${APP_VERSION}" ;;
+    mock-provider) LOCAL="northwind/mock-provider:${APP_VERSION}" ;;
+  esac
+
+  if [ -n "${IMAGE_REGISTRY:-}" ]; then
+    REMOTE="${IMAGE_REGISTRY}/${svc}:${APP_VERSION}"
+    if docker pull "$REMOTE" >/dev/null 2>&1; then
+      docker tag "$REMOTE" "$LOCAL"
+      echo "  ${svc}: pulled ${REMOTE} → ${LOCAL}"
+      continue
+    fi
+    echo "  ${svc}: pull ${REMOTE} failed — falling back to local/build" >&2
+  fi
+
+  if docker image inspect "$LOCAL" >/dev/null 2>&1; then
+    echo "  ${svc}: using local ${LOCAL}"
+    continue
+  fi
+
+  echo "  ${svc}: building locally (no registry image, none cached)"
+  docker compose build "$svc"
+done
 
 # 5. Rollout — idempotent, no destructive 'down'
 echo "[5/6] Rolling out"
