@@ -116,7 +116,7 @@ services:
       resources: { limits: { memory: 512M } }
 
   mock-provider:
-    image: northwind/mock-provider:local
+    image: northwind/mock-provider:${APP_VERSION:-local}
     build:
       context: ..
       dockerfile: mock-provider/Dockerfile

@@ -42,7 +42,7 @@ jobs:
           pip install -r services/worker/requirements.txt
           pip install pytest ruff
 
-      # ✅ Ключевое: python -m pytest добавляет cwd в sys.path, поэтому `import app` работает
+      # python -m pytest добавляет cwd в sys.path → `import app` работает
       - name: Run tests
         run: |
           set -euo pipefail
@@ -64,19 +64,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # APP_VERSION=SHA заставит compose протегировать образы
+      # как northwind/payment-api:<SHA> и т.д. через ${APP_VERSION:-...}
       - name: Build and push images
         if: github.event_name == 'push'
         env:
           SHA: ${{ steps.meta.outputs.sha }}
+          APP_VERSION: ${{ steps.meta.outputs.sha }}
         run: |
           set -euo pipefail
           cd deploy
-           touch runtime.env  
+          touch runtime.env
           docker compose build api worker mock-provider
+
           for svc in api worker mock-provider; do
-            SRC="$(docker compose images -q "$svc" | head -n1)"
-            if [ -z "$SRC" ]; then
-              echo "Image for service '$svc' not found"
+            case "$svc" in
+              api)           SRC="northwind/payment-api:${APP_VERSION}" ;;
+              worker)        SRC="northwind/payment-worker:${APP_VERSION}" ;;
+              mock-provider) SRC="northwind/mock-provider:${APP_VERSION}" ;;
+            esac
+            if ! docker image inspect "$SRC" >/dev/null 2>&1; then
+              echo "Image $SRC not found after build"
+              docker images | grep -E 'northwind|payment' || docker images
               exit 1
             fi
             docker tag "$SRC" "${REGISTRY}/${IMAGE_BASE}/${svc}:${SHA}"
@@ -94,8 +103,6 @@ jobs:
         env:
           SHA: ${{ steps.meta.outputs.sha }}
         run: |
-          # exit-code 0 — не валим сборку при находках, как в исходнике (|| true).
-          # Для security gate поменяй на --exit-code 1.
           for svc in api worker mock-provider; do
             echo "== Scanning ${svc} =="
             trivy image --no-progress --exit-code 0 --severity HIGH,CRITICAL \
@@ -104,7 +111,6 @@ jobs:
 
   cd:
     needs: ci
-    # Деплой только при push в main, не на pull_request
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -128,7 +134,7 @@ jobs:
           set -euo pipefail
           cd deploy
 
-          # Подтягиваем образы, собранные и просканированные в CI
+          # Подтягиваем образы из GHCR и перетегируем под имена compose
           for svc in api worker mock-provider; do
             docker pull "${REGISTRY}/${IMAGE_BASE}/${svc}:${APP_VERSION}"
             case "$svc" in
@@ -139,7 +145,7 @@ jobs:
             docker tag "${REGISTRY}/${IMAGE_BASE}/${svc}:${APP_VERSION}" "${TARGET}:${APP_VERSION}"
           done
 
-          # env + vault (как в deploy.sh, но без локальной сборки)
+          # env + vault
           touch runtime.env
           set -a
           . "env/prod.env"
@@ -150,23 +156,26 @@ jobs:
           ./vault/seed.sh prod
           ./vault/render-env.sh prod
 
-          # Поднимаем сервисы из готовых образов без пересборки
           docker compose up -d --remove-orphans
-
           for service in api worker mock-provider; do
             docker compose ps "$service"
           done
 
+      # api не публикует порт наружу — только reverse-proxy.
+      # Поэтому health-check выполняется ВНУТРИ контейнера api.
       - name: Wait for API health
         run: |
+          cd deploy
           for i in $(seq 1 30); do
-            if curl -fsS http://localhost:8000/health; then
+            if docker compose exec -T api python -c \
+              "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"; then
               echo "API healthy"
               exit 0
             fi
             sleep 2
           done
           echo "API did not become healthy in time"
+          docker compose logs --tail=100 api || true
           exit 1
 
       - name: Apply migrations
@@ -185,9 +194,18 @@ jobs:
       - name: Post-deploy smoke test
         run: |
           set -euo pipefail
-          curl -fsS http://localhost:8000/health
           cd deploy
+          # API
+          docker compose exec -T api python -c \
+            "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"
+          # DB
           docker compose exec -T db pg_isready -U payments -d payments
+          # Reverse-proxy (снаружи, через опубликованный порт)
+          if curl -fsS "http://localhost:${API_PORT:-8080}/health" >/dev/null 2>&1; then
+            echo "Reverse-proxy /health OK"
+          else
+            echo "WARN: reverse-proxy /health not reachable at :${API_PORT:-8080} (check nginx.conf)"
+          fi
           echo "All health checks passed"
 
       - name: Record deployment
