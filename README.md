@@ -54,3 +54,9 @@ make smoke ENV=stage
 # Ожидаемо: OK: api /health, OK: api /health/ready, OK: db pg_isready,
 #           OK: reverse-proxy /health, OK: worker running
 #           ===== SMOKE stage PASSED =====
+
+## CI/CD
+
+Доказательство прогона:
+- Level 2 (базовый pipeline): https://github.com/exxillon0/doverkafintech_test/actions/runs/42389989594
+- Level 3 (DLQ + backup + Vault): https://github.com/exxillon0/doverkafintech_test/actions/runs/42417734882
