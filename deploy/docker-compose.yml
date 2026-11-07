@@ -56,8 +56,8 @@ services:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 20
-      start_period: 30s
+      retries: 30
+      start_period: 60s
     restart: unless-stopped
     logging: *logging
     deploy:
