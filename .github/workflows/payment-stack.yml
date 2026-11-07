@@ -42,12 +42,12 @@ jobs:
           pip install -r services/worker/requirements.txt
           pip install pytest ruff
 
-   
+      # ✅ Ключевое: python -m pytest добавляет cwd в sys.path, поэтому `import app` работает
       - name: Run tests
         run: |
           set -euo pipefail
-          (cd services/api && pytest tests -v)
-          (cd services/worker && pytest tests -v)
+          (cd services/api && python -m pytest tests -v)
+          (cd services/worker && python -m pytest tests -v)
 
       - name: Lint
         run: ruff check services/api/ services/worker/
@@ -64,7 +64,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-     
       - name: Build and push images
         if: github.event_name == 'push'
         env:
@@ -94,6 +93,8 @@ jobs:
         env:
           SHA: ${{ steps.meta.outputs.sha }}
         run: |
+          # exit-code 0 — не валим сборку при находках, как в исходнике (|| true).
+          # Для security gate поменяй на --exit-code 1.
           for svc in api worker mock-provider; do
             echo "== Scanning ${svc} =="
             trivy image --no-progress --exit-code 0 --severity HIGH,CRITICAL \
@@ -102,7 +103,7 @@ jobs:
 
   cd:
     needs: ci
-   
+    # Деплой только при push в main, не на pull_request
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -119,7 +120,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-   
       - name: Deploy to production
         env:
           APP_VERSION: ${{ needs.ci.outputs.sha }}
@@ -127,22 +127,21 @@ jobs:
           set -euo pipefail
           cd deploy
 
-          # Подтягиваем образы, собранные в CI
+          # Подтягиваем образы, собранные и просканированные в CI
           for svc in api worker mock-provider; do
             docker pull "${REGISTRY}/${IMAGE_BASE}/${svc}:${APP_VERSION}"
-            # Перетегируем под имена, которые ждёт docker-compose.yml
             case "$svc" in
-              api)   TARGET="northwind/payment-api" ;;
-              worker) TARGET="northwind/payment-worker" ;;
+              api)           TARGET="northwind/payment-api" ;;
+              worker)        TARGET="northwind/payment-worker" ;;
               mock-provider) TARGET="northwind/mock-provider" ;;
             esac
             docker tag "${REGISTRY}/${IMAGE_BASE}/${svc}:${APP_VERSION}" "${TARGET}:${APP_VERSION}"
           done
 
-          # Окружение и vault (как в deploy.sh, но без build)
+          # env + vault (как в deploy.sh, но без локальной сборки)
           touch runtime.env
           set -a
-          . "env/prod.env"   # если у тебя stage — замени на stage
+          . "env/prod.env"
           set +a
 
           docker compose down
@@ -150,7 +149,7 @@ jobs:
           ./vault/seed.sh prod
           ./vault/render-env.sh prod
 
-          # Поднимаем сервисы из готовых образов
+          # Поднимаем сервисы из готовых образов без пересборки
           docker compose up -d --remove-orphans
 
           for service in api worker mock-provider; do
@@ -168,7 +167,6 @@ jobs:
           done
           echo "API did not become healthy in time"
           exit 1
-
 
       - name: Apply migrations
         run: |
