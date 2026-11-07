@@ -42,10 +42,12 @@ jobs:
           pip install -r services/worker/requirements.txt
           pip install pytest ruff
 
+   
       - name: Run tests
         run: |
-          pytest services/api/tests -v
-          pytest services/worker/tests -v
+          set -euo pipefail
+          (cd services/api && pytest tests -v)
+          (cd services/worker && pytest tests -v)
 
       - name: Lint
         run: ruff check services/api/ services/worker/
@@ -55,7 +57,6 @@ jobs:
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to registry
-        # Пушим образы только при push в main (не на PR из форков)
         if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
@@ -63,6 +64,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+     
       - name: Build and push images
         if: github.event_name == 'push'
         env:
@@ -92,8 +94,6 @@ jobs:
         env:
           SHA: ${{ steps.meta.outputs.sha }}
         run: |
-          # exit-code 0 — не блокируем деплой, как в исходнике (|| true).
-          # Хочешь security gate — поменяй на --exit-code 1.
           for svc in api worker mock-provider; do
             echo "== Scanning ${svc} =="
             trivy image --no-progress --exit-code 0 --severity HIGH,CRITICAL \
@@ -102,7 +102,7 @@ jobs:
 
   cd:
     needs: ci
-    # Деплой только при push в main, не на pull_request
+   
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -119,15 +119,43 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+   
       - name: Deploy to production
         env:
-          IMAGE_TAG: ${{ needs.ci.outputs.sha }}
-          IMAGE_REGISTRY: ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}
+          APP_VERSION: ${{ needs.ci.outputs.sha }}
         run: |
+          set -euo pipefail
           cd deploy
-          # deploy.sh должен использовать ${IMAGE_TAG} / ${IMAGE_REGISTRY}
-          # для `docker compose pull` и запуска нужной версии.
-          ./deploy.sh prod
+
+          # Подтягиваем образы, собранные в CI
+          for svc in api worker mock-provider; do
+            docker pull "${REGISTRY}/${IMAGE_BASE}/${svc}:${APP_VERSION}"
+            # Перетегируем под имена, которые ждёт docker-compose.yml
+            case "$svc" in
+              api)   TARGET="northwind/payment-api" ;;
+              worker) TARGET="northwind/payment-worker" ;;
+              mock-provider) TARGET="northwind/mock-provider" ;;
+            esac
+            docker tag "${REGISTRY}/${IMAGE_BASE}/${svc}:${APP_VERSION}" "${TARGET}:${APP_VERSION}"
+          done
+
+          # Окружение и vault (как в deploy.sh, но без build)
+          touch runtime.env
+          set -a
+          . "env/prod.env"   # если у тебя stage — замени на stage
+          set +a
+
+          docker compose down
+          docker compose up -d --wait vault
+          ./vault/seed.sh prod
+          ./vault/render-env.sh prod
+
+          # Поднимаем сервисы из готовых образов
+          docker compose up -d --remove-orphans
+
+          for service in api worker mock-provider; do
+            docker compose ps "$service"
+          done
 
       - name: Wait for API health
         run: |
@@ -141,8 +169,10 @@ jobs:
           echo "API did not become healthy in time"
           exit 1
 
+
       - name: Apply migrations
         run: |
+          set -euo pipefail
           cd deploy
           if [ -f migrations/001_create_transfers.sql ]; then
             docker compose exec -T db \
@@ -150,7 +180,7 @@ jobs:
               < migrations/001_create_transfers.sql
             echo "Migrations applied"
           else
-            echo "No migrations found, skipping"
+            echo "No migrations found at migrations/001_create_transfers.sql"
           fi
 
       - name: Post-deploy smoke test
